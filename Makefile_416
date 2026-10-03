@@ -1,0 +1,15 @@
+CC = gcc
+CFLAGS = -Wall -Wextra
+
+all: agent_416 controller_416
+
+agent_416: agent_416.c
+	$(CC) $(CFLAGS) agent_416.c -o agent_416
+
+controller_416: controller_416.c
+	$(CC) $(CFLAGS) controller_416.c -o controller_416
+
+clean:
+	rm -f agent_416 controller_416
+
+.PHONY: all clean
