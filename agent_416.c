@@ -292,6 +292,145 @@ void handle_listproc(int client_fd)
 
 
 /*
+ * PUT
+ *
+ * Receives a file from the Controller.
+ *
+ * Protocol:
+ *
+ * PUT <filename> <filesize>
+ * followed by exactly <filesize> raw bytes.
+ */
+void handle_put(int client_fd,
+                const char *filename,
+                long filesize)
+{
+    char filepath[512];
+
+
+    /*
+     * Store uploaded files inside:
+     * ./agentfiles/IT24100416/
+     */
+    snprintf(filepath,
+             sizeof(filepath),
+             "./agentfiles/IT24100416/%s",
+             filename);
+
+
+    /*
+     * Open file in binary write mode.
+     */
+    FILE *fp = fopen(filepath, "wb");
+
+    if (fp == NULL)
+    {
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "ERR FILE_OPEN SID:%s\n",
+                 SID);
+
+        send_message(client_fd, response);
+
+        return;
+    }
+
+
+    /*
+     * Receive file data in chunks.
+     */
+    char file_buffer[4096];
+
+    long remaining = filesize;
+
+
+    while (remaining > 0)
+    {
+        size_t to_receive;
+
+
+        /*
+         * Receive either 4096 bytes
+         * or whatever remains.
+         */
+        if (remaining > (long)sizeof(file_buffer))
+        {
+            to_receive = sizeof(file_buffer);
+        }
+        else
+        {
+            to_receive = (size_t)remaining;
+        }
+
+
+        ssize_t received = recv(client_fd,
+                                file_buffer,
+                                to_receive,
+                                0);
+
+
+        /*
+         * Connection/error during transfer.
+         */
+        if (received <= 0)
+        {
+            fclose(fp);
+
+            remove(filepath);
+
+            return;
+        }
+
+
+        /*
+         * Write received bytes to file.
+         */
+        size_t written = fwrite(file_buffer,
+                                1,
+                                (size_t)received,
+                                fp);
+
+
+        /*
+         * File writing error.
+         */
+        if (written != (size_t)received)
+        {
+            fclose(fp);
+
+            remove(filepath);
+
+            return;
+        }
+
+
+        remaining -= received;
+    }
+
+
+    fclose(fp);
+
+
+    /*
+     * Tell Controller that upload
+     * completed successfully.
+     */
+    char response[BUFFER_SIZE];
+
+    snprintf(response,
+             sizeof(response),
+             "OK FILE_RECEIVED %s SID:%s\n",
+             filename,
+             SID);
+
+
+    send_message(client_fd, response);
+}
+
+
+/*
  * EXEC
  *
  * Allowed commands:
@@ -440,6 +579,7 @@ int main(void)
     if (server_fd < 0)
     {
         perror("socket");
+
         return 1;
     }
 
@@ -509,6 +649,7 @@ int main(void)
 
 
     printf("RemoteOps Agent started.\n");
+
     printf("Listening on TCP port %d...\n",
            PORT);
 
@@ -652,10 +793,77 @@ int main(void)
 
 
         /*
+         * PUT
+         */
+        if (strncmp(buffer,
+                    "PUT ",
+                    4) == 0)
+        {
+            char filename[256];
+
+            long filesize;
+
+
+            memset(filename,
+                   0,
+                   sizeof(filename));
+
+
+            /*
+             * Read filename and file size.
+             */
+            if (sscanf(buffer + 4,
+                       "%255s %ld",
+                       filename,
+                       &filesize) != 2)
+            {
+                char response[BUFFER_SIZE];
+
+                snprintf(response,
+                         sizeof(response),
+                         "ERR INVALID_PUT SID:%s\n",
+                         SID);
+
+                send_message(client_fd,
+                             response);
+
+                continue;
+            }
+
+
+            /*
+             * Reject invalid file size.
+             */
+            if (filesize < 0)
+            {
+                char response[BUFFER_SIZE];
+
+                snprintf(response,
+                         sizeof(response),
+                         "ERR INVALID_SIZE SID:%s\n",
+                         SID);
+
+                send_message(client_fd,
+                             response);
+
+                continue;
+            }
+
+
+            /*
+             * Receive the file.
+             */
+            handle_put(client_fd,
+                       filename,
+                       filesize);
+        }
+
+
+        /*
          * SYSINFO
          */
-        if (strcmp(buffer,
-                   "SYSINFO") == 0)
+        else if (strcmp(buffer,
+                        "SYSINFO") == 0)
         {
             handle_sysinfo(client_fd);
         }
@@ -742,6 +950,7 @@ int main(void)
      * Close sockets.
      */
     close(client_fd);
+
     close(server_fd);
 
 
