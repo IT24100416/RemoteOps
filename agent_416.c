@@ -34,7 +34,7 @@ int send_message(int client_fd, const char *message)
             return -1;
         }
 
-        total += sent;
+        total += (size_t)sent;
     }
 
     return 0;
@@ -171,9 +171,9 @@ void handle_listproc(int client_fd)
 
 
     /* Start response */
-    used += snprintf(response + used,
-                     sizeof(response) - used,
-                     "OK PROCS");
+    used += (size_t)snprintf(response + used,
+                             sizeof(response) - used,
+                             "OK PROCS");
 
 
     /* Open /proc */
@@ -235,7 +235,7 @@ void handle_listproc(int client_fd)
         {
             /* Remove newline */
             process_name[strcspn(process_name,
-                                 "\r\n")] = '\0';
+                                  "\r\n")] = '\0';
 
 
             /* Add process to response */
@@ -249,8 +249,7 @@ void handle_listproc(int client_fd)
 
 
             if (written < 0 ||
-                (size_t)written >=
-                sizeof(response) - used)
+                (size_t)written >= sizeof(response) - used)
             {
                 fclose(fp);
                 break;
@@ -406,7 +405,7 @@ void handle_put(int client_fd,
         }
 
 
-        remaining -= received;
+        remaining -= (long)received;
     }
 
 
@@ -431,6 +430,215 @@ void handle_put(int client_fd,
 
 
 /*
+ * GET
+ *
+ * Sends a file from the Agent to the Controller.
+ *
+ * Protocol:
+ *
+ * Controller sends:
+ *
+ *     GET <filename>
+ *
+ * Agent sends:
+ *
+ *     OK FILE_SIZE <filesize> SID:<sid>\n
+ *
+ * followed by exactly <filesize> raw bytes.
+ *
+ * Finally:
+ *
+ *     OK FILE_SENT <filename> SID:<sid>\n
+ */
+void handle_get(int client_fd,
+                const char *filename)
+{
+    char filepath[512];
+
+
+    /*
+     * Files are stored inside:
+     *
+     * ./agentfiles/IT24100416/
+     */
+    snprintf(filepath,
+             sizeof(filepath),
+             "./agentfiles/IT24100416/%s",
+             filename);
+
+
+    /*
+     * Open file in binary read mode.
+     */
+    FILE *fp = fopen(filepath, "rb");
+
+    if (fp == NULL)
+    {
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "ERR FILE_NOT_FOUND SID:%s\n",
+                 SID);
+
+        send_message(client_fd, response);
+
+        return;
+    }
+
+
+    /*
+     * Move to end of file to determine size.
+     */
+    if (fseek(fp, 0, SEEK_END) != 0)
+    {
+        fclose(fp);
+
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "ERR FILE_ERROR SID:%s\n",
+                 SID);
+
+        send_message(client_fd, response);
+
+        return;
+    }
+
+
+    long filesize = ftell(fp);
+
+    if (filesize < 0)
+    {
+        fclose(fp);
+
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "ERR FILE_ERROR SID:%s\n",
+                 SID);
+
+        send_message(client_fd, response);
+
+        return;
+    }
+
+
+    /*
+     * Return to beginning of file.
+     */
+    rewind(fp);
+
+
+    /*
+     * Tell Controller the file size.
+     */
+    char response[BUFFER_SIZE];
+
+    snprintf(response,
+             sizeof(response),
+             "OK FILE_SIZE %ld SID:%s\n",
+             filesize,
+             SID);
+
+
+    if (send_message(client_fd, response) < 0)
+    {
+        fclose(fp);
+
+        return;
+    }
+
+
+    /*
+     * Send file contents.
+     */
+    char file_buffer[4096];
+
+    long remaining = filesize;
+
+
+    while (remaining > 0)
+    {
+        size_t to_read;
+
+
+        if (remaining > (long)sizeof(file_buffer))
+        {
+            to_read = sizeof(file_buffer);
+        }
+        else
+        {
+            to_read = (size_t)remaining;
+        }
+
+
+        size_t bytes_read =
+            fread(file_buffer,
+                  1,
+                  to_read,
+                  fp);
+
+
+        if (bytes_read == 0)
+        {
+            fclose(fp);
+
+            return;
+        }
+
+
+        /*
+         * Send the complete chunk.
+         */
+        size_t total_sent = 0;
+
+        while (total_sent < bytes_read)
+        {
+            ssize_t sent =
+                send(client_fd,
+                     file_buffer + total_sent,
+                     bytes_read - total_sent,
+                     0);
+
+
+            if (sent <= 0)
+            {
+                fclose(fp);
+
+                return;
+            }
+
+
+            total_sent += (size_t)sent;
+        }
+
+
+        remaining -= (long)bytes_read;
+    }
+
+
+    fclose(fp);
+
+
+    /*
+     * Tell Controller that the download
+     * has completed.
+     */
+    snprintf(response,
+             sizeof(response),
+             "OK FILE_SENT %s SID:%s\n",
+             filename,
+             SID);
+
+
+    send_message(client_fd, response);
+}
+
+
+/*
  * EXEC
  *
  * Allowed commands:
@@ -441,7 +649,8 @@ void handle_put(int client_fd,
  * HOSTNAME
  * WHOAMI
  */
-void handle_exec(int client_fd, const char *command)
+void handle_exec(int client_fd,
+                 const char *command)
 {
     const char *allowed_command = NULL;
 
@@ -856,6 +1065,49 @@ int main(void)
             handle_put(client_fd,
                        filename,
                        filesize);
+        }
+
+
+        /*
+         * GET
+         */
+        else if (strncmp(buffer,
+                         "GET ",
+                         4) == 0)
+        {
+            char filename[256];
+
+            memset(filename,
+                   0,
+                   sizeof(filename));
+
+
+            /*
+             * Read requested filename.
+             */
+            if (sscanf(buffer + 4,
+                       "%255s",
+                       filename) != 1)
+            {
+                char response[BUFFER_SIZE];
+
+                snprintf(response,
+                         sizeof(response),
+                         "ERR INVALID_GET SID:%s\n",
+                         SID);
+
+                send_message(client_fd,
+                             response);
+
+                continue;
+            }
+
+
+            /*
+             * Send requested file.
+             */
+            handle_get(client_fd,
+                       filename);
         }
 
 
