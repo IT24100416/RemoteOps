@@ -6,24 +6,19 @@
 #include <sys/socket.h>
 #include <pthread.h>
 #include <errno.h>
+#include <stdint.h>
 
 #define SERVER_IP "127.0.0.1"
 #define PORT 9410
 #define BUFFER_SIZE 1024
+#define FILE_BUFFER_SIZE 4096
+
 #define UDP_DEFAULT_PORT 9411
 
 #define AUTH_TOKEN "OPS-0416"
 
 /* ============================================================
- * UDP monitor state
- * ============================================================ */
-
-static int udp_monitor_running = 0;
-static int udp_socket_fd = -1;
-static pthread_t udp_thread;
-
-/* ============================================================
- * Send all bytes
+ * TCP SEND ALL
  * ============================================================ */
 
 int send_all(int sock_fd,
@@ -31,9 +26,7 @@ int send_all(int sock_fd,
              size_t length)
 {
     size_t total = 0;
-
-    const char *ptr =
-        (const char *)data;
+    const char *ptr = data;
 
     while (total < length)
     {
@@ -55,7 +48,7 @@ int send_all(int sock_fd,
 }
 
 /* ============================================================
- * Receive line
+ * TCP RECEIVE LINE
  * ============================================================ */
 
 int recv_line(int sock_fd,
@@ -96,7 +89,7 @@ int recv_line(int sock_fd,
 }
 
 /* ============================================================
- * Receive exact number of bytes
+ * RECEIVE EXACT DATA
  * ============================================================ */
 
 int recv_all(int sock_fd,
@@ -104,9 +97,7 @@ int recv_all(int sock_fd,
              size_t length)
 {
     size_t total = 0;
-
-    char *ptr =
-        (char *)buffer;
+    char *ptr = buffer;
 
     while (total < length)
     {
@@ -128,8 +119,12 @@ int recv_all(int sock_fd,
 }
 
 /* ============================================================
- * UDP monitor receiver thread
+ * UDP MONITOR
  * ============================================================ */
+
+static int udp_monitor_running = 0;
+static int udp_socket_fd = -1;
+static pthread_t udp_thread;
 
 void *udp_monitor_receiver(void *arg)
 {
@@ -137,13 +132,13 @@ void *udp_monitor_receiver(void *arg)
 
     char buffer[BUFFER_SIZE];
 
-    struct sockaddr_in sender_addr;
-
-    socklen_t sender_len =
-        sizeof(sender_addr);
-
     while (udp_monitor_running)
     {
+        struct sockaddr_in sender_addr;
+
+        socklen_t sender_len =
+            sizeof(sender_addr);
+
         ssize_t received =
             recvfrom(udp_socket_fd,
                      buffer,
@@ -164,7 +159,6 @@ void *udp_monitor_receiver(void *arg)
                 continue;
             }
 
-            perror("recvfrom");
             break;
         }
 
@@ -179,10 +173,6 @@ void *udp_monitor_receiver(void *arg)
 
     return NULL;
 }
-
-/* ============================================================
- * Start UDP monitor
- * ============================================================ */
 
 int start_udp_monitor(int port)
 {
@@ -233,7 +223,6 @@ int start_udp_monitor(int port)
         perror("UDP bind");
 
         close(udp_socket_fd);
-
         udp_socket_fd = -1;
 
         return -1;
@@ -251,7 +240,6 @@ int start_udp_monitor(int port)
         udp_monitor_running = 0;
 
         close(udp_socket_fd);
-
         udp_socket_fd = -1;
 
         return -1;
@@ -259,10 +247,6 @@ int start_udp_monitor(int port)
 
     return 0;
 }
-
-/* ============================================================
- * Stop UDP monitor
- * ============================================================ */
 
 void stop_udp_monitor(void)
 {
@@ -273,15 +257,15 @@ void stop_udp_monitor(void)
 
     udp_monitor_running = 0;
 
-    /*
-     * Closing the socket wakes recvfrom().
-     */
-    shutdown(udp_socket_fd,
-             SHUT_RDWR);
+    if (udp_socket_fd >= 0)
+    {
+        shutdown(udp_socket_fd,
+                 SHUT_RDWR);
 
-    close(udp_socket_fd);
+        close(udp_socket_fd);
 
-    udp_socket_fd = -1;
+        udp_socket_fd = -1;
+    }
 
     pthread_join(udp_thread,
                  NULL);
@@ -295,26 +279,26 @@ void handle_put(int sock_fd,
                 const char *filename)
 {
     FILE *fp =
-        fopen(filename,
-              "rb");
+        fopen(filename, "rb");
 
     if (fp == NULL)
     {
-        printf("Cannot open file: %s\n",
-               filename);
+        perror("Cannot open file");
         return;
     }
 
-    fseek(fp,
-          0,
-          SEEK_END);
+    if (fseek(fp,
+              0,
+              SEEK_END) != 0)
+    {
+        fclose(fp);
+        return;
+    }
 
     long filesize =
         ftell(fp);
 
-    fseek(fp,
-          0,
-          SEEK_SET);
+    rewind(fp);
 
     if (filesize < 0)
     {
@@ -338,33 +322,35 @@ void handle_put(int sock_fd,
         return;
     }
 
-    char response[BUFFER_SIZE];
+    char file_buffer[FILE_BUFFER_SIZE];
 
-    if (recv_line(sock_fd,
-                  response,
-                  sizeof(response)) < 0)
+    long remaining =
+        filesize;
+
+    while (remaining > 0)
     {
-        fclose(fp);
-        return;
-    }
+        size_t chunk;
 
-    /*
-     * Send file data.
-     */
+        if (remaining >
+            (long)sizeof(file_buffer))
+        {
+            chunk = sizeof(file_buffer);
+        }
+        else
+        {
+            chunk = (size_t)remaining;
+        }
 
-    char file_buffer[4096];
-
-    while (1)
-    {
         size_t bytes_read =
             fread(file_buffer,
                   1,
-                  sizeof(file_buffer),
+                  chunk,
                   fp);
 
-        if (bytes_read == 0)
+        if (bytes_read != chunk)
         {
-            break;
+            fclose(fp);
+            return;
         }
 
         if (send_all(sock_fd,
@@ -374,9 +360,14 @@ void handle_put(int sock_fd,
             fclose(fp);
             return;
         }
+
+        remaining -=
+            (long)bytes_read;
     }
 
     fclose(fp);
+
+    char response[BUFFER_SIZE];
 
     if (recv_line(sock_fd,
                   response,
@@ -422,23 +413,12 @@ void handle_get(int sock_fd,
     printf("Agent: %s\n",
            response);
 
-    if (strncmp(response,
-                "OK FILE_SEND ",
-                13) != 0)
-    {
-        return;
-    }
-
-    char returned_filename[256];
-
     long filesize;
 
     if (sscanf(response,
-               "OK FILE_SEND %255s %ld",
-               returned_filename,
-               &filesize) != 2)
+               "OK FILE_SIZE %ld",
+               &filesize) != 1)
     {
-        printf("Invalid FILE_SEND response.\n");
         return;
     }
 
@@ -453,7 +433,7 @@ void handle_get(int sock_fd,
     snprintf(output_filename,
              sizeof(output_filename),
              "downloaded_%s",
-             returned_filename);
+             filename);
 
     FILE *fp =
         fopen(output_filename,
@@ -466,46 +446,60 @@ void handle_get(int sock_fd,
     }
 
     printf("Downloading %s (%ld bytes)...\n",
-           returned_filename,
+           filename,
            filesize);
 
-    char file_buffer[4096];
+    char file_buffer[FILE_BUFFER_SIZE];
 
-    long remaining = filesize;
+    long remaining =
+        filesize;
 
     while (remaining > 0)
     {
-        size_t to_receive;
+        size_t chunk;
 
-        if (remaining > (long)sizeof(file_buffer))
+        if (remaining >
+            (long)sizeof(file_buffer))
         {
-            to_receive =
-                sizeof(file_buffer);
+            chunk = sizeof(file_buffer);
         }
         else
         {
-            to_receive =
-                (size_t)remaining;
+            chunk = (size_t)remaining;
         }
 
         if (recv_all(sock_fd,
                      file_buffer,
-                     to_receive) < 0)
+                     chunk) < 0)
         {
             fclose(fp);
             return;
         }
 
-        fwrite(file_buffer,
-               1,
-               to_receive,
-               fp);
+        if (fwrite(file_buffer,
+                   1,
+                   chunk,
+                   fp) != chunk)
+        {
+            fclose(fp);
+            return;
+        }
 
         remaining -=
-            (long)to_receive;
+            (long)chunk;
     }
 
     fclose(fp);
+
+    if (recv_line(sock_fd,
+                  response,
+                  sizeof(response)) < 0)
+    {
+        return;
+    }
+
+    printf("Agent: %s\n",
+           response);
 
     printf("Download complete: %s\n",
            output_filename);
@@ -566,9 +560,11 @@ int main(void)
 
     printf("Connected to RemoteOps Agent.\n");
 
-    /*
-     * Authentication
-     */
+    /* ========================================================
+     * AUTH
+     * ======================================================== */
+
+    char buffer[BUFFER_SIZE];
 
     char auth_message[BUFFER_SIZE];
 
@@ -585,8 +581,6 @@ int main(void)
         return 1;
     }
 
-    char buffer[BUFFER_SIZE];
-
     if (recv_line(sock_fd,
                   buffer,
                   sizeof(buffer)) < 0)
@@ -594,16 +588,15 @@ int main(void)
         printf("Agent disconnected.\n");
 
         close(sock_fd);
-
         return 1;
     }
 
     printf("Agent: %s\n",
            buffer);
 
-    /*
-     * Command loop
-     */
+    /* ========================================================
+     * COMMAND LOOP
+     * ======================================================== */
 
     while (1)
     {
@@ -625,9 +618,9 @@ int main(void)
             continue;
         }
 
-        /*
+        /* ====================================================
          * PUT
-         */
+         * ==================================================== */
 
         if (strncmp(buffer,
                     "PUT ",
@@ -649,9 +642,9 @@ int main(void)
             continue;
         }
 
-        /*
+        /* ====================================================
          * GET
-         */
+         * ==================================================== */
 
         if (strncmp(buffer,
                     "GET ",
@@ -673,18 +666,16 @@ int main(void)
             continue;
         }
 
-        /*
+        /* ====================================================
          * MONITOR START
-         *
-         * Local UDP receiver must start before
-         * asking Agent to send UDP packets.
-         */
+         * ==================================================== */
 
         if (strncmp(buffer,
                     "MONITOR START",
-                    14) == 0)
+                    13) == 0)
         {
-            int port = UDP_DEFAULT_PORT;
+            int port =
+                UDP_DEFAULT_PORT;
 
             int parsed_port;
 
@@ -730,9 +721,9 @@ int main(void)
             continue;
         }
 
-        /*
+        /* ====================================================
          * MONITOR STOP
-         */
+         * ==================================================== */
 
         if (strcmp(buffer,
                    "MONITOR STOP") == 0)
@@ -762,9 +753,9 @@ int main(void)
             continue;
         }
 
-        /*
+        /* ====================================================
          * QUIT
-         */
+         * ==================================================== */
 
         if (strcmp(buffer,
                    "QUIT") == 0)
@@ -789,9 +780,9 @@ int main(void)
             break;
         }
 
-        /*
-         * Normal TCP command.
-         */
+        /* ====================================================
+         * NORMAL COMMAND
+         * ==================================================== */
 
         char message[BUFFER_SIZE + 1];
 
