@@ -3,7 +3,7 @@
 ## Student Details
 
 - Student ID: IT24100416
-- Student Name: Sesath
+- Student Name: Sesath Rathnayaka
 - Module: Network Programming
 - Project: RemoteOps
 
@@ -43,13 +43,28 @@ Other EXEC commands are rejected.
 
 ## Environment
 
-- Operating System: CentOS 10
-- Programming Language: C
-- Protocol: TCP
-- TCP Port: 9410
-- Compiler: GCC
+Operating System : Linux / CentOS
+Programming Language : C
+Compiler : GCC
+Build Tool : Make
+Networking : TCP/IP and UDP
+Concurrency : POSIX pthreads
+TCP Port : 9410
+UDP Port : 9411
 
-## Current Status
+##Development History
+The project was developed incrementally using Git.
+Major development stages included:
+1. Implement core TCP RemoteOps functionality
+2. Implement PUT file upload
+3. Implement GET file download
+4. Implement TCP message framing
+5. Add pthread-based multiple client support
+6. Implement UDP monitoring
+7. Complete UDP monitoring and logging
+8. Fix GET file transfer protocol
+9. Finalize project documentation
 
-Day 1 - Core TCP implementation completed.
-
+##Project Completion
+The RemoteOps project was completed as an implementation of a remote system monitoring and management tool over TCP/IP.
+The final implementation demonstrates socket programming, TCP communication, concurrent client handling, authentication, system monitoring, file transfer, UDP monitoring, message framing, and graceful connection management.
