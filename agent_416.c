@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <stdarg.h>
+#include <ctype.h>
 
 #define PORT 9410
 #define BUFFER_SIZE 1024
@@ -20,9 +21,29 @@
 #define SID "6140"
 
 #define FILE_DIRECTORY "./agentfiles/IT24100416"
-#define LOG_FILE "remoteops.log"
+#define LOG_FILE "remoteops_IT24100416.log"
 
 #define MONITOR_INTERVAL 5
+
+/* Protocol error codes */
+#define ERR_AUTH_FAILED          001
+#define ERR_COMMAND_NOT_ALLOWED  002
+#define ERR_NOT_AUTHENTICATED    003
+#define ERR_FILE_TOO_LARGE       004
+#define ERR_FILE_NOT_FOUND       005
+#define ERR_INVALID_REQUEST      006
+#define ERR_INVALID_SIZE         007
+#define ERR_FILE_OPEN_FAILED     008
+#define ERR_INTERNAL_ERROR       009
+#define ERR_UNKNOWN_COMMAND      010
+#define ERR_MONITOR_RUNNING      011
+#define ERR_MONITOR_SOCKET       012
+#define ERR_INVALID_ADDRESS      013
+#define ERR_MONITOR_THREAD       014
+#define ERR_MONITOR_NOT_RUNNING  015
+#define ERR_INVALID_PORT         016
+
+#define MAX_FILE_SIZE (100L * 1024L * 1024L)
 
 /* ============================================================
  * GLOBAL UDP MONITOR STATE
@@ -411,6 +432,34 @@ void handle_listproc(int client_fd)
 }
 
 /* ============================================================
+ * FILENAME VALIDATION
+ * ============================================================ */
+
+int valid_filename(const char *filename)
+{
+    size_t i;
+
+    if (filename == NULL || *filename == '\0')
+        return 0;
+
+    if (strlen(filename) >= 256)
+        return 0;
+
+    if (strcmp(filename, ".") == 0 || strcmp(filename, "..") == 0)
+        return 0;
+
+    for (i = 0; filename[i] != '\0'; i++)
+    {
+        unsigned char c = (unsigned char)filename[i];
+
+        if (!(isalnum(c) || c == '.' || c == '_' || c == '-'))
+            return 0;
+    }
+
+    return 1;
+}
+
+/* ============================================================
  * PUT
  * ============================================================ */
 
@@ -419,12 +468,23 @@ void handle_put(int client_fd,
                 long filesize)
 {
     char filepath[512];
-
     FILE *fp;
-
     char file_buffer[FILE_BUFFER_SIZE];
-
     long remaining = filesize;
+
+    if (!valid_filename(filename))
+    {
+        send_message(client_fd,
+                     "ERR 006 INVALID_REQUEST SID:" SID "\n");
+        return;
+    }
+
+    if (filesize < 0 || filesize > MAX_FILE_SIZE)
+    {
+        send_message(client_fd,
+                     "ERR 007 INVALID_SIZE SID:" SID "\n");
+        return;
+    }
 
     mkdir("agentfiles", 0755);
     mkdir(FILE_DIRECTORY, 0755);
@@ -439,50 +499,42 @@ void handle_put(int client_fd,
     if (fp == NULL)
     {
         send_message(client_fd,
-                     "ERR FILE_OPEN SID:" SID "\n");
-
+                     "ERR 008 FILE_OPEN_FAILED SID:" SID "\n");
         return;
     }
 
     while (remaining > 0)
     {
-        size_t chunk;
+        size_t chunk = (remaining > (long)sizeof(file_buffer))
+                     ? sizeof(file_buffer)
+                     : (size_t)remaining;
 
-        if (remaining >
-            (long)sizeof(file_buffer))
-        {
-            chunk = sizeof(file_buffer);
-        }
-        else
-        {
-            chunk = (size_t)remaining;
-        }
-
-        if (recv_all(client_fd,
-                     file_buffer,
-                     chunk) < 0)
+        if (recv_all(client_fd, file_buffer, chunk) < 0)
         {
             fclose(fp);
             remove(filepath);
-
             return;
         }
 
-        if (fwrite(file_buffer,
-                   1,
-                   chunk,
-                   fp) != chunk)
+        if (fwrite(file_buffer, 1, chunk, fp) != chunk)
         {
             fclose(fp);
             remove(filepath);
-
+            send_message(client_fd,
+                         "ERR 009 INTERNAL_ERROR SID:" SID "\n");
             return;
         }
 
         remaining -= (long)chunk;
     }
 
-    fclose(fp);
+    if (fclose(fp) != 0)
+    {
+        remove(filepath);
+        send_message(client_fd,
+                     "ERR 009 INTERNAL_ERROR SID:" SID "\n");
+        return;
+    }
 
     {
         char response[BUFFER_SIZE];
@@ -493,8 +545,7 @@ void handle_put(int client_fd,
                  filename,
                  SID);
 
-        send_message(client_fd,
-                     response);
+        send_message(client_fd, response);
     }
 }
 
@@ -506,14 +557,18 @@ void handle_get(int client_fd,
                 const char *filename)
 {
     char filepath[512];
-
     FILE *fp;
-
     long filesize;
     long remaining;
-
     char response[BUFFER_SIZE];
     char file_buffer[FILE_BUFFER_SIZE];
+
+    if (!valid_filename(filename))
+    {
+        send_message(client_fd,
+                     "ERR 006 INVALID_REQUEST SID:" SID "\n");
+        return;
+    }
 
     snprintf(filepath,
              sizeof(filepath),
@@ -525,43 +580,50 @@ void handle_get(int client_fd,
     if (fp == NULL)
     {
         send_message(client_fd,
-                     "ERR FILE_NOT_FOUND SID:" SID "\n");
-
+                     "ERR 005 FILE_NOT_FOUND SID:" SID "\n");
         return;
     }
 
     if (fseek(fp, 0, SEEK_END) != 0)
     {
         fclose(fp);
-
         send_message(client_fd,
-                     "ERR FILE_ERROR SID:" SID "\n");
-
+                     "ERR 009 INTERNAL_ERROR SID:" SID "\n");
         return;
     }
 
     filesize = ftell(fp);
 
-    if (filesize < 0)
+    if (filesize < 0 || filesize > MAX_FILE_SIZE)
     {
         fclose(fp);
-
         send_message(client_fd,
-                     "ERR FILE_ERROR SID:" SID "\n");
-
+                     "ERR 009 INTERNAL_ERROR SID:" SID "\n");
         return;
     }
 
-    rewind(fp);
+    if (fseek(fp, 0, SEEK_SET) != 0)
+    {
+        fclose(fp);
+        send_message(client_fd,
+                     "ERR 009 INTERNAL_ERROR SID:" SID "\n");
+        return;
+    }
 
+    /*
+     * Exact GET protocol:
+     *   OK FILE_SEND <filename> <filesize> SID:6140
+     * followed immediately by exactly <filesize> raw bytes.
+     * There is no trailing FILE_SENT line.
+     */
     snprintf(response,
              sizeof(response),
-             "OK FILE_SIZE %ld SID:%s\n",
+             "OK FILE_SEND %s %ld SID:%s\n",
+             filename,
              filesize,
              SID);
 
-    if (send_message(client_fd,
-                     response) < 0)
+    if (send_message(client_fd, response) < 0)
     {
         fclose(fp);
         return;
@@ -571,30 +633,17 @@ void handle_get(int client_fd,
 
     while (remaining > 0)
     {
-        size_t chunk;
+        size_t chunk = (remaining > (long)sizeof(file_buffer))
+                     ? sizeof(file_buffer)
+                     : (size_t)remaining;
 
-        if (remaining >
-            (long)sizeof(file_buffer))
-        {
-            chunk = sizeof(file_buffer);
-        }
-        else
-        {
-            chunk = (size_t)remaining;
-        }
-
-        if (fread(file_buffer,
-                  1,
-                  chunk,
-                  fp) != chunk)
+        if (fread(file_buffer, 1, chunk, fp) != chunk)
         {
             fclose(fp);
             return;
         }
 
-        if (send_all(client_fd,
-                     file_buffer,
-                     chunk) < 0)
+        if (send_all(client_fd, file_buffer, chunk) < 0)
         {
             fclose(fp);
             return;
@@ -604,15 +653,6 @@ void handle_get(int client_fd,
     }
 
     fclose(fp);
-
-    snprintf(response,
-             sizeof(response),
-             "OK FILE_SENT %s SID:%s\n",
-             filename,
-             SID);
-
-    send_message(client_fd,
-                 response);
 }
 
 /* ============================================================
@@ -648,7 +688,7 @@ void handle_exec(int client_fd,
     if (allowed == NULL)
     {
         send_message(client_fd,
-                     "ERR COMMAND_NOT_ALLOWED SID:" SID "\n");
+                     "ERR 002 COMMAND_NOT_ALLOWED SID:" SID "\n");
 
         return;
     }
@@ -658,7 +698,7 @@ void handle_exec(int client_fd,
     if (fp == NULL)
     {
         send_message(client_fd,
-                     "ERR EXEC_FAILED SID:" SID "\n");
+                     "ERR 009 INTERNAL_ERROR SID:" SID "\n");
 
         return;
     }
@@ -772,7 +812,7 @@ void handle_monitor_start(int client_fd,
         pthread_mutex_unlock(&monitor_mutex);
 
         send_message(client_fd,
-                     "ERR MONITOR_ALREADY_RUNNING SID:" SID "\n");
+                     "ERR 011 MONITOR_ALREADY_RUNNING SID:" SID "\n");
 
         return;
     }
@@ -787,7 +827,7 @@ void handle_monitor_start(int client_fd,
         pthread_mutex_unlock(&monitor_mutex);
 
         send_message(client_fd,
-                     "ERR MONITOR_SOCKET SID:" SID "\n");
+                     "ERR 012 MONITOR_SOCKET_ERROR SID:" SID "\n");
 
         return;
     }
@@ -813,7 +853,7 @@ void handle_monitor_start(int client_fd,
         pthread_mutex_unlock(&monitor_mutex);
 
         send_message(client_fd,
-                     "ERR INVALID_ADDRESS SID:" SID "\n");
+                     "ERR 013 INVALID_ADDRESS SID:" SID "\n");
 
         return;
     }
@@ -834,7 +874,7 @@ void handle_monitor_start(int client_fd,
         pthread_mutex_unlock(&monitor_mutex);
 
         send_message(client_fd,
-                     "ERR MONITOR_THREAD SID:" SID "\n");
+                     "ERR 014 MONITOR_THREAD_ERROR SID:" SID "\n");
 
         return;
     }
@@ -862,7 +902,7 @@ void handle_monitor_stop(int client_fd)
         pthread_mutex_unlock(&monitor_mutex);
 
         send_message(client_fd,
-                     "ERR MONITOR_NOT_RUNNING SID:" SID "\n");
+                     "ERR 015 MONITOR_NOT_RUNNING SID:" SID "\n");
 
         return;
     }
@@ -1035,7 +1075,7 @@ void *client_thread(void *arg)
             else
             {
                 send_message(client_fd,
-                             "ERR AUTH SID:" SID "\n");
+                             "ERR 001 AUTH_FAILED SID:" SID "\n");
 
                 printf("[Thread %lu] Authentication failed.\n",
                        (unsigned long)thread_id);
@@ -1054,7 +1094,7 @@ void *client_thread(void *arg)
         if (!authenticated)
         {
             send_message(client_fd,
-                         "ERR NOT_AUTHENTICATED SID:" SID "\n");
+                         "ERR 003 NOT_AUTHENTICATED SID:" SID "\n");
 
             log_event("Thread %lu: Rejected unauthenticated command",
                       (unsigned long)thread_id);
@@ -1080,7 +1120,7 @@ void *client_thread(void *arg)
                 filesize < 0)
             {
                 send_message(client_fd,
-                             "ERR INVALID_PUT SID:" SID "\n");
+                             "ERR 006 INVALID_REQUEST SID:" SID "\n");
 
                 continue;
             }
@@ -1112,7 +1152,7 @@ void *client_thread(void *arg)
                        filename) != 1)
             {
                 send_message(client_fd,
-                             "ERR INVALID_GET SID:" SID "\n");
+                             "ERR 006 INVALID_REQUEST SID:" SID "\n");
 
                 continue;
             }
@@ -1206,7 +1246,7 @@ void *client_thread(void *arg)
                 !is_number(port_text))
             {
                 send_message(client_fd,
-                             "ERR INVALID_PORT SID:" SID "\n");
+                             "ERR 016 INVALID_PORT SID:" SID "\n");
 
                 continue;
             }
@@ -1217,7 +1257,7 @@ void *client_thread(void *arg)
                 udp_port > 65535)
             {
                 send_message(client_fd,
-                             "ERR INVALID_PORT SID:" SID "\n");
+                             "ERR 016 INVALID_PORT SID:" SID "\n");
 
                 continue;
             }
@@ -1301,7 +1341,7 @@ void *client_thread(void *arg)
          * ==================================================== */
 
         send_message(client_fd,
-                     "ERR UNKNOWN_COMMAND SID:" SID "\n");
+                     "ERR 010 UNKNOWN_COMMAND SID:" SID "\n");
 
         log_event("Thread %lu: Unknown command",
                   (unsigned long)thread_id);

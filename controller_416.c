@@ -147,7 +147,7 @@ void *udp_monitor_receiver(void *arg)
                      (struct sockaddr *)&sender_addr,
                      &sender_len);
 
-        if (received < 0)
+        if (received <= 0)
         {
             if (!udp_monitor_running)
             {
@@ -388,6 +388,10 @@ void handle_get(int sock_fd,
                 const char *filename)
 {
     char command[BUFFER_SIZE];
+    char response[BUFFER_SIZE];
+    char received_filename[256];
+    long filesize;
+    char file_buffer[FILE_BUFFER_SIZE];
 
     snprintf(command,
              sizeof(command),
@@ -401,30 +405,43 @@ void handle_get(int sock_fd,
         return;
     }
 
-    char response[BUFFER_SIZE];
-
     if (recv_line(sock_fd,
                   response,
                   sizeof(response)) < 0)
     {
+        printf("Agent disconnected while waiting for GET response.\n");
         return;
     }
 
-    printf("Agent: %s\n",
-           response);
-
-    long filesize;
+    /*
+     * Exact GET protocol:
+     *   OK FILE_SEND <filename> <filesize> SID:6140
+     * followed immediately by exactly <filesize> raw bytes.
+     * There is no FILE_SENT response after the bytes.
+     */
+    memset(received_filename, 0, sizeof(received_filename));
+    filesize = -1;
 
     if (sscanf(response,
-               "OK FILE_SIZE %ld",
-               &filesize) != 1)
+               "OK FILE_SEND %255s %ld SID:6140",
+               received_filename,
+               &filesize) != 2)
     {
+        printf("Agent: %s\n", response);
         return;
     }
 
     if (filesize < 0)
     {
-        printf("Invalid file size.\n");
+        printf("Invalid file size received.\n");
+        return;
+    }
+
+    if (strcmp(received_filename, filename) != 0)
+    {
+        printf("GET filename mismatch: requested '%s', received '%s'.\n",
+               filename,
+               received_filename);
         return;
     }
 
@@ -435,9 +452,7 @@ void handle_get(int sock_fd,
              "downloaded_%s",
              filename);
 
-    FILE *fp =
-        fopen(output_filename,
-              "wb");
+    FILE *fp = fopen(output_filename, "wb");
 
     if (fp == NULL)
     {
@@ -445,64 +460,48 @@ void handle_get(int sock_fd,
         return;
     }
 
+    printf("Agent: %s\n", response);
     printf("Downloading %s (%ld bytes)...\n",
            filename,
            filesize);
 
-    char file_buffer[FILE_BUFFER_SIZE];
-
-    long remaining =
-        filesize;
+    long remaining = filesize;
 
     while (remaining > 0)
     {
-        size_t chunk;
-
-        if (remaining >
-            (long)sizeof(file_buffer))
-        {
-            chunk = sizeof(file_buffer);
-        }
-        else
-        {
-            chunk = (size_t)remaining;
-        }
+        size_t chunk = (remaining > (long)sizeof(file_buffer))
+                     ? sizeof(file_buffer)
+                     : (size_t)remaining;
 
         if (recv_all(sock_fd,
                      file_buffer,
                      chunk) < 0)
         {
             fclose(fp);
+            remove(output_filename);
+            printf("GET failed while receiving file data.\n");
             return;
         }
 
-        if (fwrite(file_buffer,
-                   1,
-                   chunk,
-                   fp) != chunk)
+        if (fwrite(file_buffer, 1, chunk, fp) != chunk)
         {
             fclose(fp);
+            remove(output_filename);
+            printf("GET failed while writing downloaded file.\n");
             return;
         }
 
-        remaining -=
-            (long)chunk;
+        remaining -= (long)chunk;
     }
 
-    fclose(fp);
-
-    if (recv_line(sock_fd,
-                  response,
-                  sizeof(response)) < 0)
+    if (fclose(fp) != 0)
     {
+        remove(output_filename);
+        printf("Failed to close downloaded file.\n");
         return;
     }
 
-    printf("Agent: %s\n",
-           response);
-
-    printf("Download complete: %s\n",
-           output_filename);
+    printf("Download complete: %s\n", output_filename);
 }
 
 /* ============================================================
