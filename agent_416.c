@@ -396,7 +396,8 @@ void handle_listproc(int client_fd)
             written =
                 snprintf(response + used,
                           sizeof(response) - used,
-                          " %s:%s",
+                          "%s%s:%s",
+                          (count == 0) ? " " : ",",
                           entry->d_name,
                           name);
 
@@ -479,10 +480,17 @@ void handle_put(int client_fd,
         return;
     }
 
-    if (filesize < 0 || filesize > MAX_FILE_SIZE)
+    if (filesize < 0)
     {
         send_message(client_fd,
                      "ERR 007 INVALID_SIZE SID:" SID "\n");
+        return;
+    }
+
+    if (filesize > MAX_FILE_SIZE)
+    {
+        send_message(client_fd,
+                     "ERR 004 FILE_TOO_LARGE SID:" SID "\n");
         return;
     }
 
@@ -1116,8 +1124,7 @@ void *client_thread(void *arg)
             if (sscanf(buffer + 4,
                        "%255s %ld",
                        filename,
-                       &filesize) != 2 ||
-                filesize < 0)
+                       &filesize) != 2)
             {
                 send_message(client_fd,
                              "ERR 006 INVALID_REQUEST SID:" SID "\n");
